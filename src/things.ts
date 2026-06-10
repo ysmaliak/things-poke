@@ -62,12 +62,12 @@ function propertiesRecord(fields: Record<string, string | undefined>): string {
   return `{${entries.join(", ")}}`;
 }
 
-export async function getVersion(): Promise<string> {
+export async function getVersion(options: { timeoutMs?: number } = {}): Promise<string> {
   return await runAppleScript(`
 tell application "Things3"
   return version
 end tell
-`);
+`, options);
 }
 
 export async function getLists(): Promise<unknown[]> {

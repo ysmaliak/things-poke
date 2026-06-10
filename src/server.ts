@@ -1,7 +1,9 @@
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
 import type { Request, Response, NextFunction } from "express";
+import { AppleScriptError } from "./appleScript.js";
 import { createThingsPokeMcpServer } from "./mcp.js";
+import { getVersion } from "./things.js";
 
 export interface ServerOptions {
   host?: string;
@@ -37,6 +39,38 @@ function isMcpPath(path: string): boolean {
   return path === "/mcp" || path.endsWith("/mcp");
 }
 
+export interface AutomationStatus {
+  status: "granted" | "denied" | "timeout" | "error";
+  appVersion?: string;
+  message?: string;
+}
+
+let automationCheck: Promise<AutomationStatus> | null = null;
+
+function checkAutomation(timeoutMs: number): Promise<AutomationStatus> {
+  if (automationCheck) {
+    return automationCheck;
+  }
+
+  automationCheck = getVersion({ timeoutMs })
+    .then((appVersion): AutomationStatus => ({ status: "granted", appVersion }))
+    .catch((error: unknown): AutomationStatus => {
+      const message = error instanceof Error ? error.message : String(error);
+      if (error instanceof AppleScriptError && error.kind === "not-authorized") {
+        return { status: "denied", message };
+      }
+      if (error instanceof AppleScriptError && error.kind === "timeout") {
+        return { status: "timeout", message };
+      }
+      return { status: "error", message };
+    })
+    .finally(() => {
+      automationCheck = null;
+    });
+
+  return automationCheck;
+}
+
 const mcpRoutePattern = /^(?:\/[^/]+)*\/mcp$/;
 
 export function startServer(options: ServerOptions = {}) {
@@ -54,6 +88,13 @@ export function startServer(options: ServerOptions = {}) {
       tunnelCompatibleMcp: "/*/mcp",
       auth: apiToken ? "bearer" : "none",
     });
+  });
+
+  app.get("/health/automation", async (req, res) => {
+    const requested = Number.parseInt(String(req.query.timeoutMs ?? ""), 10);
+    const timeoutMs = Math.min(Number.isFinite(requested) && requested > 0 ? requested : 120_000, 180_000);
+    const result = await checkAutomation(timeoutMs);
+    res.json(result);
   });
 
   app.use((req, res, next) => {
@@ -120,6 +161,16 @@ export function startServer(options: ServerOptions = {}) {
   const httpServer = app.listen(port, host, () => {
     console.log(`things-poke MCP server listening at http://${host}:${port}/mcp`);
     console.log(apiToken ? "Bearer auth enabled via THINGS_POKE_API_TOKEN" : "Bearer auth disabled for localhost development");
+
+    checkAutomation(120_000)
+      .then((result) => {
+        if (result.status === "granted") {
+          console.log(`Automation permission OK (Things ${result.appVersion})`);
+        } else {
+          console.error(`Automation permission check: ${result.status}. ${result.message ?? ""}`);
+        }
+      })
+      .catch(() => undefined);
   });
 
   return httpServer;
